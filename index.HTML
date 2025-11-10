@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>Full Retro Arcade - Touch (Android)</title>
+<style>
+  :root{
+    --bg:#08080a;
+    --panel:#0f1720;
+    --ui:#e8f1ff;
+    --accent:#7cffc5;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ui);font-family:monospace; -webkit-tap-highlight-color: transparent;}
+  #gameWrap{position:relative;max-width:900px;margin:0 auto;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+  canvas{background:#111;border:3px solid #222;display:block;width:100%;height:auto;max-height:80vh;touch-action:none;}
+  #ui{display:flex;gap:12px;align-items:center;justify-content:center;margin:8px 0;font-size:16px;}
+  #startBtn{padding:10px 16px;background:var(--accent);color:#052014;border:none;border-radius:8px;font-weight:700;cursor:pointer}
+  #gameOver{color:#ff6b6b;font-size:20px;text-align:center;display:none;margin-top:8px;}
+  /* Kontrol layar sentuh (D-pad) */
+  #touchControls{
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    width: 160px;
+    height: 160px;
+    display:grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: 1fr 1fr 1fr;
+    gap:8px;
+    pointer-events:none; /* allow only button children to receive events */
+  }
+  .padBtn{
+    pointer-events:auto;
+    background: rgba(255,255,255,0.03);
+    border:1px solid rgba(255,255,255,0.06);
+    border-radius:12px;
+    display:flex;align-items:center;justify-content:center;
+    user-select:none; touch-action:none;
+    -webkit-user-select:none;
+    font-size:18px;color:var(--ui);
+  }
+  /* arrange arrow positions */
+  .empty{background:transparent;border:none;}
+  #btnUp{grid-column:2;grid-row:1;}
+  #btnLeft{grid-column:1;grid-row:2;}
+  #btnDown{grid-column:2;grid-row:3;}
+  #btnRight{grid-column:3;grid-row:2;}
+  /* Extra action button (right side) */
+  #actionControls{
+    position:absolute;
+    right:12px;
+    bottom:22px;
+    display:flex;
+    gap:12px;
+    flex-direction:column;
+  }
+  .actionBtn{
+    width:72px;height:72px;border-radius:36px;
+    background:rgba(124,255,197,0.08);border:1px solid rgba(124,255,197,0.12);
+    display:flex;align-items:center;justify-content:center;font-size:18px;
+    user-select:none; touch-action:none; pointer-events:auto; color:var(--ui);
+  }
+  /* small-screen tweaks */
+  @media (max-width:420px){
+    #touchControls{width:140px;height:140px;gap:6px;}
+    .actionBtn{width:64px;height:64px;border-radius:32px;}
+  }
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <canvas id="gameCanvas" width="360" height="360"></canvas>
+
+  <div id="ui">
+    <div>Skor: <span id="score">0</span></div>
+    <div>❤️ Nyawa: <span id="lives">3</span></div>
+    <div>🔥 Level: <span id="level">1</span></div>
+    <button id="startBtn">▶️ MULAI</button>
+  </div>
+
+  <div id="gameOver">💀 GAME OVER 💀<br>Tekan MULAI untuk bermain lagi</div>
+
+  <!-- Touch D-pad (kiri bawah) -->
+  <div id="touchControls" aria-hidden="false">
+    <div class="empty"></div>
+    <div id="btnUp" class="padBtn">↑</div>
+    <div class="empty"></div>
+    <div id="btnLeft" class="padBtn">◀</div>
+    <div class="empty"></div>
+    <div id="btnRight" class="padBtn">▶</div>
+    <div class="empty"></div>
+    <div id="btnDown" class="padBtn">↓</div>
+    <div class="empty"></div>
+  </div>
+
+  <!-- Action buttons (kanan bawah): contoh tombol A = collect / interact -->
+  <div id="actionControls">
+    <div id="btnA" class="actionBtn">A</div>
+    <div id="btnB" class="actionBtn">B</div>
+  </div>
+</div>
+
+<script>
+/* ===========================
+   Game dengan dukungan layar sentuh
+   - Virtual D-pad (pointer events)
+   - Action buttons (A/B)
+   - Responsive canvas sesuai ukuran layar
+   - Tetap support keyboard
+   =========================== */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const levelEl = document.getElementById('level');
+const startBtn = document.getElementById('startBtn');
+const gameOverEl = document.getElementById('gameOver');
+
+let audioCtx = null;
+let musicPlaying = false;
+let gameOver = false;
+let musicInterval = null;
+let player = {x:20, y:140, size:20, color:"lime", speed:3};
+let enemies = [{x:250, y:50, size:20, color:"red", speed:1.5, dir:1}];
+let coin = {x:150, y:150, size:10, color:"yellow"};
+let powerUps = [];
+let particles = [];
+let bgOffset = 0;
+let score = 0, lives = 3, level = 1;
+let keys = {}; // keyboard and virtual controls share same keys
+
+/* ---------- Responsif canvas ---------- */
+function resizeCanvasToScreen(){
+  // gunakan square area berdasarkan lebar layar, beri padding UI
+  const wrap = document.getElementById('gameWrap');
+  const maxWidth = Math.min(window.innerWidth, 900);
+  // canvas pixel size (logical) tetap 360x360 -> gunakan CSS scaling for crispness
+  canvas.width = 360;
+  canvas.height = 360;
+  // scale canvas CSS to available width but not exceed viewport height
+  const availHeight = window.innerHeight - 140; // allowance for UI
+  const size = Math.min(maxWidth - 20, availHeight);
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+}
+window.addEventListener('resize', resizeCanvasToScreen);
+resizeCanvasToScreen();
+
+/* ---------- Util ---------- */
+function randomPos(){ return Math.floor(Math.random() * (canvas.width - 20)); }
+function isColliding(a,b){ return (a.x < b.x + b.size && a.x + a.size > b.x && a.y < b.y + b.size && a.y + a.size > b.y); }
+
+/* ---------- Partikel ---------- */
+function createParticles(x,y,count,isPowerUp=false){
+  for(let i=0;i<count;i++){
+    particles.push({
+      x:x, y:y,
+      vx:(Math.random()-0.5)*(isPowerUp?6:4),
+      vy:(Math.random()-0.5)*(isPowerUp?6:4),
+      life:20+Math.random()*10,
+      color: isPowerUp ? `hsl(${Math.random()*360},100%,80%)` : `hsl(${Math.random()*360},100%,50%)`,
+      size: isPowerUp ? 3 : 2
+    });
+  }
+}
+function updateParticles(){ particles.forEach(p=>{p.x+=p.vx; p.y+=p.vy; p.life--;}); particles = particles.filter(p=>p.life>0); }
+
+/* ---------- Musikal sederhana ---------- */
+function playBeep(freq, dur=0.1, type='square'){
+  if(!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.value = 0.05;
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur);
+}
+function startMusicLoop(){
+  if(musicPlaying || !audioCtx) return;
+  musicPlaying = true;
+  const notes=[440,550,660,880];
+  let i=0;
+  function loop(){
+    if(!musicPlaying) return;
+    playBeep(notes[i],0.2,'square');
+    i=(i+1)%notes.length;
+    musicInterval = setTimeout(loop,200);
+  }
+  loop();
+}
+
+/* ---------- Gameplay ---------- */
+function addEnemy(){
+  if(enemies.length >= 10) return;
+  enemies.push({x:randomPos(), y:randomPos(), size:20, color:'red', speed:1 + Math.random()*1.5, dir: Math.random()<0.5 ? 1 : -1});
+}
+function loseLife(){
+  playBeep(200,0.2,'sawtooth');
+  lives--;
+  livesEl.textContent = lives;
+  player.x = 20; player.y = (canvas.height - player.size)/2;
+  if(lives <= 0) endGame();
+}
+function endGame(){
+  gameOver = true;
+  gameOverEl.style.display = 'block';
+  startBtn.style.display = 'inline-block';
+  musicPlaying = false;
+  if(musicInterval) clearTimeout(musicInterval);
+  // simple sad sound
+  if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if(audioCtx.state === 'suspended') audioCtx.resume();
+  const sadNotes = [220,196,174,165,147,131,110,98];
+  let j = 0;
+  function sadLoop(){
+    if(!gameOver) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = sadNotes[j];
+    gain.gain.value = 0.08;
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + 0.6);
+    j=(j+1)%sadNotes.length;
+    setTimeout(sadLoop, 650);
+  }
+  sadLoop();
+}
+
+/* ---------- Update & Draw ---------- */
+function update(){
+  if(gameOver) return;
+  if(keys['ArrowUp']) player.y -= player.speed;
+  if(keys['ArrowDown']) player.y += player.speed;
+  if(keys['ArrowLeft']) player.x -= player.speed;
+  if(keys['ArrowRight']) player.x += player.speed;
+  // boundaries
+  player.x = Math.max(0, Math.min(canvas.width - player.size, player.x));
+  player.y = Math.max(0, Math.min(canvas.height - player.size, player.y));
+
+  enemies.forEach(e => {
+    e.x += e.speed * e.dir;
+    if(e.x <= 0 || e.x + e.size >= canvas.width) e.dir *= -1;
+    if(isColliding(player,e)) loseLife();
+  });
+
+  if(isColliding(player, coin)){
+    score += 10;
+    scoreEl.textContent = score;
+    playBeep(800,0.1,'triangle');
+    createParticles(coin.x+coin.size/2, coin.y+coin.size/2, 12);
+    coin.x = randomPos(); coin.y = randomPos();
+    let newLevel = Math.floor(score/50) + 1;
+    if(newLevel > level){
+      level = newLevel; levelEl.textContent = level; addEnemy(); playBeep(1000,0.2,'square');
+    }
+  }
+
+  powerUps.forEach((p,i)=> {
+    if(isColliding(player,p)){
+      lives++; livesEl.textContent = lives;
+      playBeep(900,0.2,'sawtooth');
+      createParticles(p.x+p.size/2, p.y+p.size/2, 30, true);
+      powerUps.splice(i,1);
+    }
+  });
+
+  // spawn & update
+  if(Math.random() < 0.01 && powerUps.length < 2) powerUps.push({x:randomPos(), y:randomPos(), size:12, color:'cyan'});
+  updateParticles();
+  bgOffset = (bgOffset + 1) % 20;
+}
+
+function drawBackground(){
+  ctx.fillStyle = '#111'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+  for(let x=0;x<canvas.width;x+=20){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke(); }
+  for(let y=0;y<canvas.height;y+=20){ ctx.beginPath(); ctx.moveTo(0,y+bgOffset); ctx.lineTo(canvas.width,y+bgOffset); ctx.stroke(); }
+}
+function draw(){
+  drawBackground();
+  // player
+  ctx.fillStyle = player.color; ctx.fillRect(player.x, player.y, player.size, player.size);
+  // enemies
+  enemies.forEach(e => { ctx.fillStyle = e.color; ctx.fillRect(e.x,e.y,e.size,e.size); });
+  // coin
+  ctx.fillStyle = coin.color; ctx.fillRect(coin.x, coin.y, coin.size, coin.size);
+  // powerups
+  powerUps.forEach(p => { ctx.fillStyle = p.color; ctx.fillRect(p.x,p.y,p.size,p.size); });
+  // particles
+  particles.forEach(p => { ctx.fillStyle = p.color; ctx.fillRect(p.x,p.y,p.size,p.size); });
+}
+
+/* ---------- Game loop ---------- */
+function gameLoop(){
+  update(); draw();
+  requestAnimationFrame(gameLoop);
+}
+
+/* ---------- Input: keyboard ---------- */
+document.addEventListener('keydown', e => { keys[e.key] = true; if(e.key === 'Enter' && startBtn.style.display !== 'none') startButtonHandler(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+/* ---------- Touch controls using pointer events ----------
+   Each pad button sets/removes corresponding Arrow key while pointer is down.
+   Works for multi-touch because pointerId is tracked per-button.
+*/
+function bindVirtualButton(el, keyName){
+  const activePointers = new Set();
+  el.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    activePointers.add(e.pointerId);
+    el.setPointerCapture(e.pointerId);
+    keys[keyName] = true;
+    // ensure audio context on first touch
+    ensureAudioContext();
+  });
+  el.addEventListener('pointerup', e => {
+    e.preventDefault();
+    activePointers.delete(e.pointerId);
+    el.releasePointerCapture(e.pointerId);
+    if(activePointers.size === 0) keys[keyName] = false;
+  });
+  el.addEventListener('pointercancel', e => {
+    e.preventDefault();
+    activePointers.delete(e.pointerId);
+    if(activePointers.size === 0) keys[keyName] = false;
+  });
+  // pointerleave should not stop if pointer is still down on element (handled by pointerup), but handle just in case
+  el.addEventListener('pointerleave', e => {
+    // no-op
+  });
+}
+
+// bind dpad
+bindVirtualButton(document.getElementById('btnUp'), 'ArrowUp');
+bindVirtualButton(document.getElementById('btnDown'), 'ArrowDown');
+bindVirtualButton(document.getElementById('btnLeft'), 'ArrowLeft');
+bindVirtualButton(document.getElementById('btnRight'), 'ArrowRight');
+
+// action buttons (A/B) - example: B triggers small speed boost while held
+const btnA = document.getElementById('btnA');
+const btnB = document.getElementById('btnB');
+bindVirtualButton(btnA, 'KeyA'); // virtual key names different but stored in keys map
+bindVirtualButton(btnB, 'KeyB');
+document.addEventListener('pointerdown', (e) => {}, {passive:false}); // ensure pointer events active
+
+// Example behavior for action buttons: A collects (we can use to teleport to coin), B temporary speed boost
+function handleActions(){
+  if(keys['KeyA']){
+    // teleport near coin (one-time effect) -> consume
+    player.x = Math.max(0, Math.min(canvas.width-player.size, coin.x - 10));
+    player.y = Math.max(0, Math.min(canvas.height-player.size, coin.y - 10));
+    keys['KeyA'] = false; // single use per press
+    playBeep(1200,0.08,'triangle');
+  }
+  if(keys['KeyB']){
+    player.speed = 5;
+  } else {
+    player.speed = 3;
+  }
+}
+
+/* ---------- Start button handler ---------- */
+function ensureAudioContext(){
+  if(!audioCtx){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // resume immediately for some browsers that require user gesture
+    audioCtx.resume().catch(()=>{});
+  }
+}
+function startButtonHandler(){
+  ensureAudioContext();
+  // reset state
+  gameOver = false;
+  gameOverEl.style.display = 'none';
+  startBtn.style.display = 'none';
+  score = 0; lives = 3; level = 1;
+  scoreEl.textContent = score; livesEl.textContent = lives; levelEl.textContent = level;
+  player.x = 20; player.y = (canvas.height - player.size)/2;
+  enemies = [{x:250,y:50,size:20,color:'red',speed:1.5,dir:1}];
+  powerUps = []; particles = [];
+  startMusicLoop();
+  requestAnimationFrame(gameLoop);
+}
+startBtn.addEventListener('click', async () => {
+  ensureAudioContext();
+  await audioCtx.resume();
+  startButtonHandler();
+});
+
+/* ---------- Main loop wrapper (includes action handling) ---------- */
+function mainLoop(){
+  if(!gameOver){
+    handleActions();
+  }
+  requestAnimationFrame(mainLoop);
+}
+mainLoop();
+
+/* ---------- Small safety: prevent context menu on long press ---------- */
+window.addEventListener('contextmenu', e => { e.preventDefault(); });
+
+/* ---------- Initial UI values ---------- */
+scoreEl.textContent = score;
+livesEl.textContent = lives;
+levelEl.textContent = level;
+</script>
+</body>
+</html>
